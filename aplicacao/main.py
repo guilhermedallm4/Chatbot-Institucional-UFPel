@@ -126,7 +126,7 @@ def _run(etapa: str, query: str, reset: bool):
         import sys as _sys
         from pathlib import Path as _Path
         from avaliar_agente import main as avaliar_main
-        perguntas = query or str(_Path(__file__).resolve().parent.parent / "avaliacao" / "perguntas_exemplo.jsonl")
+        perguntas = query or str(_Path(__file__).resolve().parent.parent / "avaliacao" / "perguntas_computacao.jsonl")
         _sys.argv = ["avaliar_agente.py", "--perguntas", perguntas]
         avaliar_main()
 

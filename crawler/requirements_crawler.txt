@@ -4,3 +4,7 @@
 aiohttp>=3.9.0            # HTTP client assíncrono (crawler async)
 beautifulsoup4>=4.12.0    # parser HTML
 lxml>=5.0.0               # backend rápido para BeautifulSoup
+requests>=2.31.0         # cliente HTTP síncrono (crawlers do WordPress:
+                         # crawl_portal_computacao.py e crawl_ppgc.py — a
+                         # REST API resolve o site em ~25 requisições, então
+                         # o async do aiohttp não se paga aqui)

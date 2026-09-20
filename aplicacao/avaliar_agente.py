@@ -117,16 +117,25 @@ def llm_judge(agente, turno: AgentTurn, esperada: str = "", pensar: bool = False
     saida = agente.gerar_simples(
         JUDGE_PROMPT.format(referencia=referencia, pergunta=turno.pergunta, contexto=contexto,
                             resposta=turno.resposta[:3000]),
-        system=JUDGE_SYSTEM, max_new_tokens=1024 if pensar else 256, pensar=pensar,
+        system=JUDGE_SYSTEM, max_new_tokens=1200 if pensar else 400, pensar=pensar,
     )
     m = re.search(r"\{[^{}]*\}", saida, re.S)
+
+    def _nota(v):
+        try:
+            return max(0, min(10, int(float(v))))
+        except (TypeError, ValueError):
+            return None
+
+    if not m:
+        # JSON truncado/malformado: recupera as notas por regex
+        notas = {k: re.search(rf'"{k}"\s*:\s*(\d+)', saida) for k in ("fidelidade", "relevancia", "completude")}
+        just = re.search(r'"justificativa"\s*:\s*"([^"]*)', saida)
+        if any(notas.values()):
+            return {k: (_nota(v.group(1)) if v else None) for k, v in notas.items()} | {
+                "justificativa": just.group(1) if just else None, "_bruto": saida[:300]}
     try:
         d = json.loads(m.group(0)) if m else {}
-        def _nota(v):
-            try:
-                return max(0, min(10, int(float(v))))
-            except (TypeError, ValueError):
-                return None
         return {"fidelidade": _nota(d.get("fidelidade")), "relevancia": _nota(d.get("relevancia")),
                 "completude": _nota(d.get("completude")), "justificativa": d.get("justificativa"),
                 "_bruto": None if m else saida[:300]}
@@ -244,7 +253,8 @@ def main():
     ap.add_argument("--judge-pensar", action="store_true", help="Judge com raciocínio <think> (mais lento)")
     ap.add_argument("--sem-emb", action="store_true", help="Não calcula similaridade por embeddings")
     ap.add_argument("--web", action="store_true", help="Habilita buscar_web no agente")
-    ap.add_argument("--sem-pensar", action="store_true", help="Desliga o raciocínio do modelo")
+    ap.add_argument("--pensar", action="store_true", help="Liga o raciocínio <think> do modelo (padrão: desligado)")
+    ap.add_argument("--sem-pensar", action="store_true", help=argparse.SUPPRESS)  # compatibilidade
     ap.add_argument("--max-rodadas", type=int, default=6)
     ap.add_argument("--mostrar-rastro", action="store_true", help="Mostra as chamadas de ferramenta em tempo real")
     args = ap.parse_args()
@@ -257,13 +267,13 @@ def main():
     saida = Path(args.saida or Path(__file__).resolve().parent.parent / "avaliacao" / "resultados" / stamp)
     saida.mkdir(parents=True, exist_ok=True)
 
-    agente = criar_agente(web=args.web, pensar=not args.sem_pensar, stream=False, max_rodadas=args.max_rodadas,
+    agente = criar_agente(web=args.web, pensar=args.pensar, stream=False, max_rodadas=args.max_rodadas,
                           verbose_tools=args.mostrar_rastro)
     t0 = time.time()
     res = avaliar(itens, agente, judge=args.judge, usar_emb=not args.sem_emb, judge_pensar=args.judge_pensar)
 
     meta = {"data": datetime.now().strftime("%d/%m/%Y %H:%M"), "modelo": agente.model.config._name_or_path,
-            "web": args.web, "pensar": not args.sem_pensar}
+            "web": args.web, "pensar": args.pensar}
     (saida / "resultados.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in res) + "\n", encoding="utf-8")
     md = relatorio_md(res, args.judge, meta)
     (saida / "relatorio.md").write_text(md, encoding="utf-8")

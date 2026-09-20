@@ -206,25 +206,38 @@ A interface permite:
 
 Alternativa ao pipeline RAG fixo: um **agente** baseado no modelo local
 [LiquidAI/LFM2.5-2.6B](https://huggingface.co/LiquidAI/LFM2.5-2.6B) que decide, a cada pergunta,
-**como** consultar a base — SQL, busca vetorial, busca por nome, leitura do registro completo ou
-leitura da página oficial — e encadeia essas ferramentas até ter a resposta. Não depende de nenhuma API
+**como** consultar a base — SQL nas views, busca vetorial, busca por nome, ficha completa da entidade
+ou leitura da página oficial — e encadeia essas ferramentas até ter a resposta. Não depende de API
 externa: embeddings (`BAAI/bge-m3`, 1024 dims) e LLM rodam na GPU local.
 
+O banco segue o modelo **relacional + vetorial** descrito em
+[`crawler/README_computacao.md`](crawler/README_computacao.md) e
+[`crawler/README_portal_ppgc.md`](crawler/README_portal_ppgc.md): três acervos no mesmo PostgreSQL
+(institucional `curso/disciplina/servidor/projeto/turma`, portal `port_*`, PPGC `ppgc_*`), views `vw_*`
+como superfície plana para o LLM escrever SQL e tabelas `emb_*` com **um embedding por faceta** da
+entidade, sempre carregando a chave (`servidor_id`, `curso_codigo`, `edital_id`…). Essa chave é o que
+permite a mescla: um acerto semântico vira `JOIN`, e um filtro relacional restringe a busca vetorial.
+
 ```
-pergunta ──▶ LFM2.5 (raciocínio <think>) ──▶ chamada de ferramenta ──▶ PostgreSQL/pgvector ──┐
-                 ▲                                                                            │
-                 └──────────────── resultado volta ao modelo (até 6 rodadas) ◀────────────────┘
+pergunta ──▶ LFM2.5 (raciocínio <think>) ──▶ ferramenta ──▶ PostgreSQL (vw_* / emb_*) ──┐
+                 ▲                                                                      │
+                 └──────────── resultado volta ao modelo (até 6 rodadas) ◀──────────────┘
                  └──▶ resposta final com fontes (URLs)
 ```
 
 | Ferramenta | Quando o modelo usa | Implementação |
 |---|---|---|
-| `buscar_por_nome(nome, tipo)` | pergunta cita pessoa/disciplina/curso/projeto | `pg_trgm` + `unaccent` em `doc_completos.titulo` |
-| `buscar_semantica(consulta, tipo)` | pergunta temática, sem nome exato | pgvector `<=>` nas tabelas `disciplinas/projetos/servidores/cursos` |
-| `consultar_sql(sql)` | contagens, filtros, listas | `SELECT` somente leitura (papel `rag_leitor`, timeout 15 s, `LIMIT` forçado) |
-| `obter_registro(doc_id)` | matriz curricular, turmas, equipe, currículo | JSONB de `doc_completos` |
-| `ler_pagina(url)` | conferir/atualizar a partir da URL oficial | HTTP restrito a `*.ufpel.edu.br` |
+| `buscar_por_nome(nome, entidade)` | nome próprio: pessoa, disciplina, curso, projeto, edital, norma, notícia | `pg_trgm` + `unaccent` nas colunas de nome; devolve a **chave** |
+| `buscar_semantica(consulta, fonte)` | tema, "algo ligado a…", "como faço para…" | ANN nas 16 tabelas `emb_*` (índice HNSW sobre `halfvec`), com `escopo`, `metadata` e chave |
+| `consultar_sql(sql)` | lista, contagem, soma, filtro por data, "todos os X" | `SELECT` somente leitura (papel `rag_leitor`, timeout, `LIMIT` forçado) contra as views `vw_*` |
+| `detalhar(entidade, chave)` | ficha completa após localizar | mescla todas as tabelas ligadas (servidor → formação, áreas, cursos, projetos, turmas…) |
+| `descrever_tabela(nome)` | coluna desconhecida / SQL falhou | `information_schema` |
+| `ler_pagina(url)` | conferir/atualizar pela página oficial | HTTP restrito a `*.ufpel.edu.br` |
 | `buscar_web(consulta)` | só com `--web`; assuntos fora da base | DuckDuckGo (`ddgs`) |
+
+O prompt de sistema é montado a partir do banco (contagens por acervo, colunas de todas as views) mais
+as regras de negócio dos READMEs do crawler (`vinculo_ativo`, `versao_atual`, normas vigentes, nível do
+edital, prazos por nível, escolha do acervo). Veja-o com `python agente_rag.py --prompt`.
 
 ### 1. Banco em Docker (acessível externamente)
 
@@ -239,16 +252,22 @@ sudo ufw allow 5432/tcp       # se o firewall estiver ativo
 O `init/01_extensoes.sql` cria `vector`, `pg_trgm`, `unaccent` e o papel somente leitura `rag_leitor`
 (usado pela ferramenta SQL do agente). Teste de fora: `psql -h <IP-da-máquina> -U gdlima -d semanticdb`.
 
-### 2. Ingestão com embeddings locais
+### 2. Schema + carga (relacional e vetorial) com embeddings locais
 
 ```bash
-cp aplicacao/.env.example aplicacao/.env      # EMBEDDING_PROVIDER=local já vem configurado
-cd crawler && python ingest_ufpel.py --reset --delay 0
-docker exec -i rag_postgres psql -U gdlima -d semanticdb < ../docker/sql/pos_ingestao.sql   # índices HNSW/GIN
+cp aplicacao/.env.example aplicacao/.env      # EMBEDDING_PROVIDER=local, EMBEDDING_DIMS=1024
+cd crawler
+python load_computacao.py        --input computacao.json        --schema   # 31 tabelas + 5 views + 5 emb_*
+python load_portal_computacao.py --input portal_computacao.json --schema   # port_*  (antes do PPGC!)
+python load_ppgc.py              --input ppgc.json              --schema   # ppgc_*  (cria vw_computacao_noticia)
 ```
 
-`providers.get_embeddings()` agora escolhe o provedor por `EMBEDDING_PROVIDER` (`local` | `nvidia`);
-todo o restante do minicurso (ingestão, busca, pipeline) continua funcionando sem chave NVIDIA.
+Os DDLs foram escritos para o `nemotron-3-embed-1b` (2048 dims). Os loaders substituem `vector(2048)`
+e `halfvec(2048)` por `EMBEDDING_DIMS` ao aplicar o schema, então o mesmo SQL serve para o `bge-m3`
+local (1024). Para voltar à NVIDIA: `EMBEDDING_PROVIDER=nvidia`, `NVIDIA_API_KEY`,
+`EMBEDDING_MODEL_NVIDIA=nvidia/nemotron-3-embed-1b`, `EMBEDDING_DIMS=2048` e rode os três loaders
+com `--schema` de novo. A ingestão antiga (`ingest_ufpel.py`, tabelas `*_info`/`doc_completos`) continua
+funcionando e convive no mesmo banco, mas o agente usa o schema novo.
 
 ### 3. Perguntar ao agente
 
@@ -256,8 +275,8 @@ todo o restante do minicurso (ingestão, busca, pipeline) continua funcionando s
 cd aplicacao
 python agente_rag.py                                      # chat interativo
 python agente_rag.py -p "Quem coordena o curso de Ciência da Computação?"
-python agente_rag.py -p "Quantos projetos estão ativos?" --json   # resposta + rastro das ferramentas
-python agente_rag.py --mostrar-pensamento                 # exibe o raciocínio
+python agente_rag.py -p "Quais professores pesquisam codificação de vídeo e sua titulação?" --json
+python agente_rag.py --pensar --mostrar-pensamento        # liga e exibe o raciocínio <think> (padrão: desligado)
 python agente_rag.py --web                                # habilita busca na internet
 python main.py --etapa agente "sua pergunta"              # via menu do minicurso
 ```
@@ -265,8 +284,8 @@ python main.py --etapa agente "sua pergunta"              # via menu do minicurs
 ### 4. Avaliar perguntas e respostas em lote
 
 ```bash
-python avaliar_agente.py --perguntas ../avaliacao/perguntas_exemplo.jsonl --judge
-python avaliar_agente.py -q "Quantos servidores há na base?" -q "Quem coordena o PPGC?"
+python avaliar_agente.py --perguntas ../avaliacao/perguntas_computacao.jsonl --judge
+python avaliar_agente.py -q "Quantas turmas há em 2026/2?" -q "Qual o edital mais recente do mestrado?"
 ```
 
 Cada linha do JSONL tem `pergunta` e, opcionalmente, `resposta_esperada`, `deve_conter`,
@@ -274,9 +293,14 @@ Cada linha do JSONL tem `pergunta` e, opcionalmente, `resposta_esperada`, `deve_
 (resposta, ferramentas chamadas com argumentos e resultados, tempos, pensamentos) e `relatorio.md`
 com acerto de conteúdo, ROUGE-L, similaridade de embeddings e, com `--judge`, notas 0–10 de
 fidelidade/relevância/completude dadas pelo próprio modelo usando o contexto recuperado como evidência.
+`perguntas_exemplo.jsonl` é o conjunto antigo (schema `*_info`); `perguntas_computacao.jsonl` cobre o
+schema novo (SQL, nome, semântica, híbrida, PPGC e portal). Na avaliação de 20/09/2026 o raciocínio `<think>`
+não melhorou a acurácia do LFM2.5-2.6B neste schema e quadruplicou o tempo, por isso ele vem desligado por
+padrão (`--pensar` liga). O agente também corrige três falhas típicas de modelos pequenos: resposta sem
+consultar nada, plano anunciado sem chamada ("Vou consultar…") e chamada a uma view como se fosse função.
 
 Arquivos: [`aplicacao/agente_lfm.py`](aplicacao/agente_lfm.py) (laço agêntico genérico e parsing de tool calls),
-[`aplicacao/agente_rag.py`](aplicacao/agente_rag.py) (ferramentas, prompt com esquema SQL, CLI),
+[`aplicacao/agente_rag.py`](aplicacao/agente_rag.py) (ferramentas, prompt com esquema, CLI),
 [`aplicacao/avaliar_agente.py`](aplicacao/avaliar_agente.py), [`docker/`](docker/).
 
 ## Notebook do curso

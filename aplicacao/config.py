@@ -41,9 +41,11 @@ COLLECTION_NAME = "documentos_institucionais"
 # 1.0 = idêntico ao query  |  0.0 = sem relação semântica
 RELEVANCE_THRESHOLD = 0.2
 
-# Dimensão dos vetores — NVIDIA nv-embedqa-e5-v5 usa 1024 dims
-# pgvector 0.6 suporta HNSW até 2000 dims; 1024 é compatível.
-EMBEDDING_DIMS = 1024
+# Dimensão dos vetores — deve bater com o modelo de embeddings em uso:
+#   BAAI/bge-m3 (local) = 1024 | nvidia/nv-embedqa-e5-v5 = 1024 | nvidia/nemotron-3-embed-1b = 2048
+# Os loaders em crawler/ (load_*.py) ajustam vector(N)/halfvec(N) dos schemas a este valor.
+# HNSW sobre `vector` vai até 2000 dims; acima disso o índice usa a projeção halfvec (até 4000).
+EMBEDDING_DIMS = int(os.getenv("EMBEDDING_DIMS", "1024"))
 
 # =============================================================================
 # COLLECTIONS POR TIPO — Portal UFPel

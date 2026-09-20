@@ -69,6 +69,8 @@ EMBEDDING_PROVIDER    = os.getenv(
     "EMBEDDING_PROVIDER", "nvidia" if NVIDIA_EMBEDDINGS_AVAILABLE else "local"
 ).strip().lower()
 EMBEDDING_MODEL_LOCAL = os.getenv("EMBEDDING_MODEL_LOCAL", "BAAI/bge-m3")
+# Modelo da NVIDIA NIM: nv-embedqa-e5-v5 (1024 dims, ~512 tokens) ou nemotron-3-embed-1b (2048 dims, ~4096 tokens)
+EMBEDDING_MODEL_NVIDIA = os.getenv("EMBEDDING_MODEL_NVIDIA", "nvidia/nv-embedqa-e5-v5")
 EMBEDDING_DEVICE      = os.getenv("EMBEDDING_DEVICE", "") or None   # None = auto
 
 _local_embeddings_singleton = None
@@ -325,9 +327,10 @@ def get_embeddings():
             "NVIDIA_API_KEY não configurada ou inválida. "
             "Defina NVIDIA_API_KEY no arquivo .env — obrigatório para embeddings."
         )
-    record_info("embeddings", "NVIDIA NIM: nvidia/nv-embedqa-e5-v5 (1024 dims)")
+    modelo = EMBEDDING_MODEL_NVIDIA
+    record_info("embeddings", f"NVIDIA NIM: {modelo} ({config.EMBEDDING_DIMS} dims)")
     return NVIDIAEmbeddings(
-        model="nvidia/nv-embedqa-e5-v5",
+        model=modelo,
         api_key=_raw_nvidia_key,
         truncate="END",
     )

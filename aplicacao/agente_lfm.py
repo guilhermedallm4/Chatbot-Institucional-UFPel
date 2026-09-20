@@ -182,6 +182,20 @@ def _strip_tool_calls(texto: str) -> str:
     return _TOOL_CALL_RE.sub("", texto).strip()
 
 
+_PLANO_RE = re.compile(
+    r"^\s*(vou |preciso |primeiro[, ]|deixe-me |deixa eu |let me |i need to |i'll |i will |first,? )"
+    r"|\b(vou (usar|consultar|descrever|buscar|verificar|executar|fazer uma busca)|farei uma busca|"
+    r"preciso (verificar|consultar|buscar))\b",
+    re.I,
+)
+
+
+def _parece_plano(texto: str) -> bool:
+    """Resposta curta que só anuncia o que o modelo *vai* fazer, sem chamada de ferramenta."""
+    t = texto.strip()
+    return bool(t) and len(t) < 700 and bool(_PLANO_RE.search(t))
+
+
 def _separar_pensamento(texto: str) -> tuple[str, str]:
     texto = texto.replace(IM_END, "")
     if THINK_END in texto:
@@ -270,7 +284,19 @@ class AgenteLFM:
         max_tool_rounds: int = 6,
         stream: bool = True,
         verbose_tools: bool = True,
+        exigir_ferramenta: bool = False,
+        max_calls_per_round: int = 4,
+        max_tool_result_chars: int = 5000,
+        max_context_tokens: int = 20000,
     ):
+        """
+        exigir_ferramenta      : se o modelo responder à 1ª rodada sem chamar ferramenta, recebe um
+                                 lembrete e gera de novo (evita resposta "de cabeça" em modelos pequenos).
+        max_calls_per_round    : limite de chamadas executadas por rodada (o resto é adiado).
+        max_tool_result_chars  : corte de cada resultado de ferramenta antes de entrar no histórico.
+        max_context_tokens     : acima disso, resultados antigos de ferramentas são resumidos no histórico
+                                 para não estourar a janela (32k) nem a memória da GPU.
+        """
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -281,6 +307,10 @@ class AgenteLFM:
         self.pensar = pensar
         self.max_tool_rounds = max_tool_rounds
         self.verbose_tools = verbose_tools
+        self.exigir_ferramenta = exigir_ferramenta
+        self.max_calls_per_round = max(1, max_calls_per_round)
+        self.max_tool_result_chars = max_tool_result_chars
+        self.max_context_tokens = max_context_tokens
 
         print(f"[agente] Carregando {model_id} ...", file=sys.stderr)
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -352,11 +382,25 @@ class AgenteLFM:
         return _strip_tool_calls(conteudo)
 
     # ------------------------------------------------------------------
+    # Hook opcional: recebe uma chamada a ferramenta inexistente e devolve um resultado
+    # (ou None para cair no erro padrão). Usado para tratar "view(arg=...)" como SQL.
+    on_unknown_tool: Optional[Callable[[ToolCall], Optional[str]]] = None
+
     def _executar(self, chamada: ToolCall) -> str:
         tool = self.tools.get(chamada.name)
-        if tool is None:
-            return f"Erro: ferramenta desconhecida '{chamada.name}'. Disponíveis: {', '.join(self.tools)}."
         t0 = time.time()
+        if tool is None:
+            resultado = None
+            if self.on_unknown_tool is not None:
+                try:
+                    resultado = self.on_unknown_tool(chamada)
+                except Exception as e:  # noqa: BLE001
+                    resultado = f"Erro ao tratar chamada desconhecida {chamada.name}: {e}"
+            if resultado is None:
+                resultado = f"Erro: ferramenta desconhecida '{chamada.name}'. Disponíveis: {', '.join(self.tools)}."
+            chamada.elapsed = time.time() - t0
+            chamada.result = resultado
+            return resultado
         try:
             resultado = str(tool.fn(**chamada.arguments))
         except TypeError as e:
@@ -364,25 +408,93 @@ class AgenteLFM:
         except Exception as e:  # noqa: BLE001
             resultado = f"Erro ao executar {chamada.name}: {type(e).__name__}: {e}"
         chamada.elapsed = time.time() - t0
+        if len(resultado) > self.max_tool_result_chars:
+            resultado = resultado[: self.max_tool_result_chars] + "\n[... resultado cortado; refine a consulta se precisar do resto]"
         chamada.result = resultado
         return resultado
+
+    def _n_tokens(self, historico: list[dict]) -> int:
+        ids = self.tokenizer.apply_chat_template(
+            historico, tools=[t.schema() for t in self.tools.values()] or None,
+            add_generation_prompt=True, tokenize=True,
+        )
+        return len(ids["input_ids"] if isinstance(ids, dict) else ids)
+
+    def _compactar_historico(self):
+        """Resume os resultados de ferramentas mais antigos quando o prompt passa de max_context_tokens."""
+        if self._n_tokens(self.historico) <= self.max_context_tokens:
+            return
+        idx_tools = [i for i, m in enumerate(self.historico) if m["role"] == "tool"]
+        for i in idx_tools[:-1]:  # preserva o resultado mais recente
+            m = self.historico[i]
+            if len(m["content"]) > 700:
+                m["content"] = m["content"][:600] + "\n[... resultado antigo resumido para caber no contexto]"
+                if self._n_tokens(self.historico) <= self.max_context_tokens:
+                    return
 
     def perguntar(self, pergunta: str) -> AgentTurn:
         turno = AgentTurn(pergunta=pergunta)
         t_ini = time.time()
         self.historico.append({"role": "user", "content": pergunta})
+        nudge_idx: Optional[int] = None  # posição do lembrete "use uma ferramenta", para limpar depois
+        plano_nudges = 0
 
         for rodada in range(self.max_tool_rounds + 1):
             turno.rodadas = rodada + 1
+            self._compactar_historico()
             bruto = self._gerar(self.historico)
             pensamento, conteudo = _separar_pensamento(bruto)
             if pensamento:
                 turno.pensamentos.append(pensamento)
             chamadas = parse_tool_calls(conteudo, self.tools)
 
+            # ---- anunciou o plano ("Vou consultar...") mas não emitiu a chamada: pede a chamada ----
+            if not chamadas and self.tools and plano_nudges < 2 and _parece_plano(_strip_tool_calls(conteudo)):
+                plano_nudges += 1
+                self.historico.append({"role": "assistant", "content": _strip_tool_calls(conteudo)})
+                self.historico.append({"role": "user", "content": (
+                    "[sistema] Você descreveu o que vai fazer, mas não chamou nenhuma ferramenta. "
+                    "Emita agora a chamada de ferramenta correspondente (ou, se já tem a informação, escreva a resposta final).")})
+                bruto = self._gerar(self.historico)
+                pensamento, conteudo = _separar_pensamento(bruto)
+                if pensamento:
+                    turno.pensamentos.append(pensamento)
+                del self.historico[-2:]
+                chamadas = parse_tool_calls(conteudo, self.tools)
+
+            # ---- respondeu sem consultar nada: lembra uma vez e gera de novo -----
+            if not chamadas and self.exigir_ferramenta and not turno.chamadas and nudge_idx is None and self.tools:
+                nudge_idx = len(self.historico)
+                self.historico.append({"role": "assistant", "content": _strip_tool_calls(conteudo)})
+                self.historico.append({
+                    "role": "user",
+                    "content": (
+                        "[sistema] Você respondeu sem consultar a base. Antes de responder, chame pelo menos uma "
+                        "ferramenta (buscar_por_nome, buscar_semantica ou consultar_sql) e baseie a resposta no "
+                        "resultado. Se a pergunta for claramente fora do escopo institucional, diga apenas isso."
+                    ),
+                })
+                continue
+
             # ---- resposta final --------------------------------------------
             if not chamadas or rodada == self.max_tool_rounds:
                 resposta = _strip_tool_calls(conteudo)
+                if not chamadas and not resposta:
+                    # O modelo fechou o <think> e parou sem escrever nada (acontece em modelos
+                    # pequenos quando a resposta "ficou" dentro do raciocínio). Pede o texto final.
+                    self.historico.append({"role": "assistant", "content": ""})
+                    self.historico.append({"role": "user", "content": (
+                        "[sistema] Sua resposta ficou vazia. Se você pretendia consultar uma ferramenta, emita a chamada "
+                        "agora; caso contrário, escreva a resposta final ao usuário em texto, com base no que já foi obtido.")})
+                    bruto = self._gerar(self.historico)
+                    pensamento, conteudo = _separar_pensamento(bruto)
+                    if pensamento:
+                        turno.pensamentos.append(pensamento)
+                    del self.historico[-2:]
+                    resposta = _strip_tool_calls(conteudo)
+                    chamadas_retry = parse_tool_calls(conteudo, self.tools)
+                    if chamadas_retry and rodada < self.max_tool_rounds:
+                        chamadas = chamadas_retry  # decidiu buscar mais: segue para a rodada de ferramentas
                 if chamadas and not resposta:
                     # Limite estourado e o modelo ainda quer chamar ferramenta:
                     # força uma resposta em texto com o que já foi coletado.
@@ -402,11 +514,15 @@ class AgenteLFM:
                 if pensamento:
                     msg["thinking"] = pensamento
                 self.historico.append(msg)
+                if nudge_idx is not None:  # remove a resposta prematura e o lembrete do histórico
+                    del self.historico[nudge_idx:nudge_idx + 2]
                 turno.resposta = resposta
                 turno.tempo_total = time.time() - t_ini
                 return turno
 
             # ---- rodada de ferramentas -------------------------------------
+            adiadas = chamadas[self.max_calls_per_round:]
+            chamadas = chamadas[: self.max_calls_per_round]
             msg = {
                 "role": "assistant",
                 "content": conteudo.split(TOOL_CALL_START, 1)[0].strip(),
@@ -427,6 +543,12 @@ class AgenteLFM:
                 turno.chamadas.append(c)
 
             conteudo_tool = "\n\n".join(resultados) if len(resultados) > 1 else resultados[0]
+            if adiadas:
+                conteudo_tool += (
+                    f"\n\n[Aviso: só as {self.max_calls_per_round} primeiras chamadas foram executadas; "
+                    f"{len(adiadas)} ficaram de fora ({', '.join(c.name for c in adiadas)}). Prefira uma consulta SQL "
+                    "que traga tudo de uma vez, ou peça o restante na próxima rodada.]"
+                )
             if rodada >= self.max_tool_rounds - 1:
                 conteudo_tool += (
                     "\n\n[Aviso: limite de chamadas atingido. Responda ao usuário agora com as "
