@@ -401,12 +401,32 @@ def consultar_sql(sql: str) -> str:
     except Exception as e:  # noqa: BLE001
         msg = str(e).splitlines()[0]
         dica = "Dica: confira colunas com descrever_tabela('<view>') e use ILIKE/unaccent para textos."
-        if "does not exist" in msg and "column" in msg:
-            dica = "Dica: essa coluna não existe — chame descrever_tabela('<view ou tabela>') para ver as colunas."
+        m_col = re.search(r'column "?([\w.]+)"? does not exist', msg)
+        if m_col:
+            dica = _sugerir_coluna(m_col.group(1).split(".")[-1], s)
         return f"Erro SQL: {msg}\n{dica}"
     if not rows:
         return "Consulta executada: 0 linhas."
     return _fmt_rows([dict(zip(cols, r)) for r in rows])
+
+
+def _sugerir_coluna(coluna: str, sql: str) -> str:
+    """Para 'column X does not exist': lista as colunas mais parecidas nas tabelas/views citadas no SQL."""
+    tabelas = set(t.lower() for t in re.findall(r"\b(?:from|join)\s+([a-zA-Z_][\w]*)", sql, re.I))
+    if not tabelas:
+        return "Dica: essa coluna não existe — chame descrever_tabela('<view ou tabela>') para ver as colunas."
+    try:
+        rows = _rows(
+            "SELECT table_name, column_name, similarity(column_name, %(c)s) AS sim FROM information_schema.columns "
+            "WHERE table_schema='public' AND table_name = ANY(%(t)s) ORDER BY sim DESC LIMIT 4",
+            {"c": coluna, "t": list(tabelas)})
+    except Exception:  # noqa: BLE001
+        rows = []
+    if rows and rows[0]["sim"] > 0.3:
+        return ("Dica: a coluna '" + coluna + "' não existe. Você quis dizer: "
+                + ", ".join(f"{r['table_name']}.{r['column_name']}" for r in rows if r["sim"] > 0.3)
+                + "? Corrija e reenvie a consulta.")
+    return f"Dica: a coluna '{coluna}' não existe em {', '.join(sorted(tabelas))} — chame descrever_tabela para ver as colunas."
 
 
 def descrever_tabela(nome: str) -> str:
