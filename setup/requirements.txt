@@ -34,3 +34,13 @@ sentence-transformers==5.5.1         # cross-encoder local (fallback do reranker
 # Avaliação de geração
 bert-score==0.3.13                   # BERTScore (modelo ~270 MB no primeiro uso)
 rouge-score==0.1.2                   # ROUGE-L (sem modelo local)
+
+# Agente local (LFM2.5) — requer torch + transformers >= 4.57 com suporte a LFM2
+# (instale o torch adequado à sua GPU antes: https://pytorch.org/get-started/locally/)
+transformers>=4.57
+accelerate>=1.0
+sentence-transformers>=3.0             # embeddings locais (BAAI/bge-m3) — EMBEDDING_PROVIDER=local
+ddgs>=9.0                              # busca web (DuckDuckGo) — ferramenta buscar_web
+requests>=2.31
+beautifulsoup4>=4.12                   # ler_pagina (extração de texto)
+lxml>=5.0

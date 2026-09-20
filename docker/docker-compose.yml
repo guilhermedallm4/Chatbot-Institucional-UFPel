@@ -1,0 +1,75 @@
+# =============================================================================
+# PostgreSQL 16 + pgvector para o Minicurso RAG / agente LFM2.5
+# =============================================================================
+# Subir:            docker compose up -d
+# Logs:             docker compose logs -f postgres
+# Parar:            docker compose down          (mantém os dados no volume)
+# Apagar tudo:      docker compose down -v       (remove o volume de dados)
+# pgAdmin opcional: docker compose --profile admin up -d   → http://<host>:5050
+#
+# Credenciais e portas vêm do arquivo .env nesta pasta (copie de .env.example).
+# A porta é publicada em 0.0.0.0, portanto o banco fica acessível de fora da
+# máquina. Libere a porta no firewall (ex.: sudo ufw allow 5432/tcp) e use uma
+# senha forte em POSTGRES_PASSWORD antes de expor em rede pública.
+# =============================================================================
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: rag_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gdlima}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-12345}
+      POSTGRES_DB: ${POSTGRES_DB:-semanticdb}
+      # scram-sha-256 para todas as conexões remotas (padrão do PG16)
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --encoding=UTF8 --locale=C.UTF-8"
+      TZ: America/Sao_Paulo
+    ports:
+      - "${POSTGRES_BIND:-0.0.0.0}:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init:/docker-entrypoint-initdb.d:ro
+    command:
+      - postgres
+      - -c
+      - listen_addresses=*
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-1GB}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE:-3GB}
+      - -c
+      - work_mem=64MB
+      - -c
+      - maintenance_work_mem=512MB
+      - -c
+      - max_connections=100
+      - -c
+      - pg_trgm.similarity_threshold=0.3
+      - -c
+      - log_min_duration_statement=1000
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gdlima} -d ${POSTGRES_DB:-semanticdb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: rag_pgadmin
+    profiles: ["admin"]
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@ufpel.edu.br}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: "True"
+    ports:
+      - "${POSTGRES_BIND:-0.0.0.0}:${PGADMIN_PORT:-5050}:80"
+    volumes:
+      - pgadmin:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  pgadmin:

@@ -62,6 +62,69 @@ except ImportError:
 
 NVIDIA_EMBEDDINGS_AVAILABLE = _nvidia_key_valid and _nvidia_embeddings_lib
 
+# ── Embeddings locais (sentence-transformers) ────────────────────────────────
+# EMBEDDING_PROVIDER=local  → modelo local (padrão quando não há chave NVIDIA)
+# EMBEDDING_PROVIDER=nvidia → NVIDIA NIM (comportamento original do minicurso)
+EMBEDDING_PROVIDER    = os.getenv(
+    "EMBEDDING_PROVIDER", "nvidia" if NVIDIA_EMBEDDINGS_AVAILABLE else "local"
+).strip().lower()
+EMBEDDING_MODEL_LOCAL = os.getenv("EMBEDDING_MODEL_LOCAL", "BAAI/bge-m3")
+EMBEDDING_DEVICE      = os.getenv("EMBEDDING_DEVICE", "") or None   # None = auto
+
+_local_embeddings_singleton = None
+_local_embeddings_lock = threading.Lock()
+
+
+class LocalEmbeddings:
+    """
+    Embeddings locais via sentence-transformers, com a mesma interface que o
+    LangChain espera (embed_documents / embed_query). Vetores normalizados
+    (norma 1), então distância cosseno == produto interno.
+
+    Modelo padrão: BAAI/bge-m3 — multilíngue, 1024 dims (mesma dimensão do
+    nv-embedqa-e5-v5, então os índices HNSW de create_indexes.sql continuam
+    válidos). Troque via EMBEDDING_MODEL_LOCAL.
+    """
+
+    def __init__(self, model_name: str = EMBEDDING_MODEL_LOCAL, device: str | None = EMBEDDING_DEVICE,
+                 batch_size: int = 32):
+        from sentence_transformers import SentenceTransformer
+        self.model_name = model_name
+        self.batch_size = batch_size
+        self._model = SentenceTransformer(model_name, device=device)
+        self.dims = self._model.get_sentence_embedding_dimension()
+        # bge-m3 aceita até 8192 tokens; limitamos para caber na memória em lotes
+        self._model.max_seq_length = min(self._model.max_seq_length or 2048, 2048)
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        vecs = self._model.encode(
+            texts, batch_size=self.batch_size, normalize_embeddings=True,
+            show_progress_bar=len(texts) > 64, convert_to_numpy=True,
+        )
+        return vecs.tolist()
+
+    def embed_query(self, text: str) -> list[float]:
+        return self.embed_documents([text])[0]
+
+    # Compatibilidade com Runnable do LangChain (alguns retrievers chamam __call__)
+    def __call__(self, text: str) -> list[float]:
+        return self.embed_query(text)
+
+
+def _get_local_embeddings() -> "LocalEmbeddings":
+    global _local_embeddings_singleton
+    if _local_embeddings_singleton is None:
+        with _local_embeddings_lock:
+            if _local_embeddings_singleton is None:
+                record_info("embeddings", f"local: {EMBEDDING_MODEL_LOCAL}")
+                print(f"[providers] Carregando embeddings locais: {EMBEDDING_MODEL_LOCAL} ...")
+                _local_embeddings_singleton = LocalEmbeddings()
+                d = _local_embeddings_singleton.dims
+                if d != config.EMBEDDING_DIMS:
+                    print(f"[providers] AVISO: modelo local tem {d} dims, mas config.EMBEDDING_DIMS="
+                          f"{config.EMBEDDING_DIMS}. Ajuste config.py e reingira os dados.")
+    return _local_embeddings_singleton
+
 # ── Constantes de modelos LLM ─────────────────────────────────────────────────
 
 NVIDIA_NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
@@ -249,7 +312,13 @@ class FallbackLLM:
 # ── API pública ───────────────────────────────────────────────────────────────
 
 def get_embeddings():
-    """Retorna embeddings NVIDIA NIM: nvidia/nv-embedqa-e5-v5 (1024 dims)."""
+    """
+    Retorna o modelo de embeddings conforme EMBEDDING_PROVIDER:
+      local  → sentence-transformers (BAAI/bge-m3, 1024 dims) — sem API
+      nvidia → NVIDIA NIM nvidia/nv-embedqa-e5-v5 (1024 dims)
+    """
+    if EMBEDDING_PROVIDER == "local":
+        return _get_local_embeddings()
     if not NVIDIA_EMBEDDINGS_AVAILABLE:
         record_fallback("embeddings", "NVIDIA_API_KEY não configurada ou inválida")
         raise EnvironmentError(

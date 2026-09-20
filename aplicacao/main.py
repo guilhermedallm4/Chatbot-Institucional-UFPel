@@ -35,6 +35,9 @@ ETAPAS = {
     "reranker":   "Avançado  : Reranking com cross-encoder",
     "guardrails": "Avançado  : Guardrails e safeguards",
     "eval":       "Avançado  : Avaliação MRR + BERTScore + LLM Judge",
+    # Agente local (LFM2.5 + SQL + pgvector)
+    "agente":     "Agente    : Chat com agente LFM2.5 (SQL + busca vetorial + web)",
+    "avaliar-agente": "Agente    : Avalia o agente em lote (avaliacao/perguntas_exemplo.jsonl)",
     # Atalhos
     "tudo":      "           Ingestão → Busca → Chatbot",
 }
@@ -113,6 +116,20 @@ def _run(etapa: str, query: str, reset: bool):
         from evaluation import demo_evaluation
         demo_evaluation()
 
+    elif etapa == "agente":
+        import sys as _sys
+        from agente_rag import main as agente_main
+        _sys.argv = ["agente_rag.py"] + (["-p", query] if query else [])
+        agente_main()
+
+    elif etapa == "avaliar-agente":
+        import sys as _sys
+        from pathlib import Path as _Path
+        from avaliar_agente import main as avaliar_main
+        perguntas = query or str(_Path(__file__).resolve().parent.parent / "avaliacao" / "perguntas_exemplo.jsonl")
+        _sys.argv = ["avaliar_agente.py", "--perguntas", perguntas]
+        avaliar_main()
+
     elif etapa == "tudo":
         from store import demo_ingestao
         from search import demo_busca
@@ -139,7 +156,7 @@ def main():
         "query",
         nargs="?",
         default="",
-        help="Pergunta opcional para as etapas 'busca' e 'rag'",
+        help="Pergunta opcional para 'busca', 'rag' e 'agente'; arquivo JSONL para 'avaliar-agente'",
     )
     parser.add_argument(
         "--reset",
