@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import os
 import re
 import sys
 import time
@@ -288,6 +289,8 @@ class AgenteLFM:
         max_calls_per_round: int = 4,
         max_tool_result_chars: int = 5000,
         max_context_tokens: int = 20000,
+        device: str = "auto",
+        dtype: Any = "auto",
     ):
         """
         exigir_ferramenta      : se o modelo responder à 1ª rodada sem chamar ferramenta, recebe um
@@ -296,6 +299,8 @@ class AgenteLFM:
         max_tool_result_chars  : corte de cada resultado de ferramenta antes de entrar no histórico.
         max_context_tokens     : acima disso, resultados antigos de ferramentas são resumidos no histórico
                                  para não estourar a janela (32k) nem a memória da GPU.
+        device                 : "auto" (GPU se houver) | "cuda" | "cpu" (AGENT_DEVICE no .env).
+        dtype                  : "auto" (bfloat16 na GPU, float32 na CPU) | "bfloat16" | "float32".
         """
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -312,10 +317,25 @@ class AgenteLFM:
         self.max_tool_result_chars = max_tool_result_chars
         self.max_context_tokens = max_context_tokens
 
-        print(f"[agente] Carregando {model_id} ...", file=sys.stderr)
+        # device: "auto" (GPU se houver), "cuda", "cpu". dtype: "auto" escolhe bfloat16 na GPU e
+        # float32 na CPU — em CPU sem AVX-512/AMX o bfloat16 é emulado e fica MAIS lento que fp32.
+        if device in ("", "auto", None):
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        if dtype in ("", "auto", None):
+            dtype = torch.bfloat16 if device.startswith("cuda") else torch.float32
+        elif isinstance(dtype, str):
+            dtype = getattr(torch, dtype)
+        if device == "cpu":
+            torch.set_num_threads(int(os.getenv("AGENT_CPU_THREADS", os.cpu_count() or 8)))
+
+        print(f"[agente] Carregando {model_id} em {device} ({str(dtype).replace('torch.', '')}) ...", file=sys.stderr)
+        t_carga = time.time()
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
-        self.model = AutoModelForCausalLM.from_pretrained(model_id, device_map="auto", dtype=torch.bfloat16)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_id, device_map=("auto" if device != "cpu" else "cpu"), dtype=dtype)
         self.model.eval()
+        self.device = device
+        print(f"[agente] Pronto em {time.time() - t_carga:.1f}s", file=sys.stderr)
         self.im_end_id = self.tokenizer.convert_tokens_to_ids(IM_END)
         self.streamer = _make_streamer_class()(self.tokenizer, mostrar_pensamento, silencioso=not stream)
         self.historico: list[dict] = []

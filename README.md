@@ -278,8 +278,38 @@ python agente_rag.py -p "Quem coordena o curso de Ciência da Computação?"
 python agente_rag.py -p "Quais professores pesquisam codificação de vídeo e sua titulação?" --json
 python agente_rag.py --pensar --mostrar-pensamento        # liga e exibe o raciocínio <think> (padrão: desligado)
 python agente_rag.py --web                                # habilita busca na internet
+python agente_rag.py --device cpu                         # roda o LLM na RAM, sem GPU (veja a seção abaixo)
 python main.py --etapa agente "sua pergunta"              # via menu do minicurso
 ```
+
+### 3b. Rodar o LLM na RAM (sem GPU)
+
+`--device cpu` (ou `AGENT_DEVICE=cpu` no `.env`) carrega o modelo na memória principal.
+Cabe com folga, mas a latência inviabiliza uso interativo. Medições nesta máquina
+(24 núcleos, AVX2 sem AVX-512/AMX, 125 GB de RAM, RTX 4090):
+
+| | RAM/VRAM | prefill (4.765 tokens) | geração | pergunta `coord_cc` ponta a ponta |
+|---|---|---|---|---|
+| GPU, bfloat16 | 6,3 GB de VRAM | 0,21 s | 32,4 tok/s | **6,0 s** |
+| CPU, float32 (transformers) | 12,2 GB de RAM | ~60 s | 2,0 tok/s | **287,4 s** |
+| CPU, Q4_K_M (llama.cpp) | 1,6 GB de RAM | 22,8 s (209 tok/s) | 14,2 tok/s | ~60–90 s (estimado) |
+
+Por que dói tanto: **99 % da latência é geração do LLM** — as consultas ao PostgreSQL
+custam 0,03 s por pergunta em média. E o prompt de sistema tem ~4,7 mil tokens (esquema
+das views + regras), que são re-processados a cada rodada de ferramenta; em CPU o prefill
+domina, não a geração.
+
+Em `float32` de propósito: esta CPU só tem AVX2, então `bfloat16` é emulado e fica **mais
+lento** (1,7 tok/s) que `float32` (2,0 tok/s). O `--device cpu` já escolhe `float32`
+sozinho; `AGENT_DTYPE` força outro.
+
+Os embeddings (`BAAI/bge-m3`) rodam em CPU sem problema: 1,2 GB de RAM e 95 ms por
+consulta, contra ~10 ms na GPU. Só o LLM é inviável.
+
+Se a GPU estiver ocupada e for preciso responder mesmo assim, o caminho prático é o
+GGUF oficial com llama.cpp (`LiquidAI/LFM2.5-2.6B-GGUF`, `Q4_K_M`, 1,6 GB), que é cerca
+de 7× mais rápido que o `transformers` em CPU e ainda usa um oitavo da RAM. Isso exige
+trocar o backend de geração do agente, o que ainda não está implementado.
 
 ### 4. Avaliar perguntas e respostas em lote
 

@@ -209,7 +209,7 @@ def relatorio_md(res: list[dict], judge: bool, meta: dict) -> str:
     linhas = [
         f"# Avaliação do agente RAG — {meta['data']}",
         "",
-        f"- Modelo: `{meta['modelo']}` | web: {meta['web']} | raciocínio: {meta['pensar']}",
+        f"- Modelo: `{meta['modelo']}` | device: {meta.get('device','?')} ({meta.get('dtype','?')}) | web: {meta['web']} | raciocínio: {meta['pensar']}",
         f"- Perguntas: {n} | Tempo médio: {_media([r['tempo_total_s'] for r in res])}s | "
         f"Rodadas médias: {_media([r['rodadas'] for r in res])}",
         f"- Acerto de conteúdo (deve_conter): {sum(contem)}/{len(contem)}" if contem else "- Acerto de conteúdo: n/a",
@@ -256,8 +256,16 @@ def main():
     ap.add_argument("--pensar", action="store_true", help="Liga o raciocínio <think> do modelo (padrão: desligado)")
     ap.add_argument("--sem-pensar", action="store_true", help=argparse.SUPPRESS)  # compatibilidade
     ap.add_argument("--max-rodadas", type=int, default=6)
+    ap.add_argument("--device", default=None, choices=["auto", "cuda", "cpu"],
+                    help="Onde rodar o modelo (padrão: auto — GPU se houver)")
     ap.add_argument("--mostrar-rastro", action="store_true", help="Mostra as chamadas de ferramenta em tempo real")
     args = ap.parse_args()
+
+    import os
+    if args.device:
+        os.environ["AGENT_DEVICE"] = args.device
+        if args.device == "cpu":
+            os.environ.setdefault("EMBEDDING_DEVICE", "cpu")
 
     itens = carregar_perguntas(args.perguntas, args.pergunta)
     if not itens:
@@ -273,7 +281,8 @@ def main():
     res = avaliar(itens, agente, judge=args.judge, usar_emb=not args.sem_emb, judge_pensar=args.judge_pensar)
 
     meta = {"data": datetime.now().strftime("%d/%m/%Y %H:%M"), "modelo": agente.model.config._name_or_path,
-            "web": args.web, "pensar": args.pensar}
+            "web": args.web, "pensar": args.pensar,
+            "device": getattr(agente, "device", "?"), "dtype": str(next(agente.model.parameters()).dtype).replace("torch.", "")}
     (saida / "resultados.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in res) + "\n", encoding="utf-8")
     md = relatorio_md(res, args.judge, meta)
     (saida / "relatorio.md").write_text(md, encoding="utf-8")

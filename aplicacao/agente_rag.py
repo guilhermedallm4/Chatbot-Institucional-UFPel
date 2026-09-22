@@ -664,6 +664,8 @@ def _criar_agente_base(web, mostrar_pensamento, pensar, stream, max_rodadas, ver
         temperature=float(os.getenv("AGENT_TEMPERATURE", kw.pop("temperature", 0.1))),
         pensar=pensar, mostrar_pensamento=mostrar_pensamento, max_tool_rounds=max_rodadas,
         stream=stream, verbose_tools=verbose_tools,
+        device=os.getenv("AGENT_DEVICE", kw.pop("device", "auto")),
+        dtype=os.getenv("AGENT_DTYPE", kw.pop("dtype", "auto")),
         exigir_ferramenta=kw.pop("exigir_ferramenta", True), max_calls_per_round=kw.pop("max_calls_per_round", 4),
         max_tool_result_chars=kw.pop("max_tool_result_chars", MAX_TOOL_CHARS), **kw,
     )
@@ -683,6 +685,8 @@ def main():
                     help="Liga o raciocínio <think> (na avaliação: mesma acurácia e 4x mais lento; padrão desligado)")
     ap.add_argument("--sem-pensar", action="store_true", help=argparse.SUPPRESS)  # compatibilidade (já é o padrão)
     ap.add_argument("--max-rodadas", type=int, default=6, help="Máximo de rodadas de ferramentas por pergunta")
+    ap.add_argument("--device", default=None, choices=["auto", "cuda", "cpu"],
+                    help="Onde rodar o modelo (padrão: auto — GPU se houver; AGENT_DEVICE no .env)")
     ap.add_argument("--prompt", action="store_true", help="Só imprime o prompt de sistema (esquema) e sai")
     args = ap.parse_args()
 
@@ -690,6 +694,10 @@ def main():
         print(montar_system_prompt(args.web))
         return
 
+    if args.device:
+        os.environ["AGENT_DEVICE"] = args.device
+        if args.device == "cpu":
+            os.environ.setdefault("EMBEDDING_DEVICE", "cpu")
     agente = criar_agente(web=args.web, mostrar_pensamento=args.mostrar_pensamento, pensar=args.pensar,
                           stream=not args.json, max_rodadas=args.max_rodadas, verbose_tools=not args.json)
 
