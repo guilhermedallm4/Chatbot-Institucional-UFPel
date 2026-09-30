@@ -28,6 +28,7 @@ Uso:
   python agente_rag.py                          # chat interativo
   python agente_rag.py -p "Quem coordena o curso de Ciência da Computação?"
   python agente_rag.py -p "..." --json          # resposta + rastro em JSON
+  python agente_rag.py --backend openrouter     # roda o mesmo LFM2.5 pela API gratuita, sem GPU
   python agente_rag.py --pensar                 # liga o raciocínio <think> (--mostrar-pensamento exibe)
   python agente_rag.py --web                    # habilita busca na internet
 Avaliação em lote: veja avaliar_agente.py
@@ -48,7 +49,7 @@ import psycopg2
 import psycopg2.extras
 
 import config  # carrega .env
-from agente_lfm import AgenteLFM, Tool
+from agente_lfm import OPENROUTER_MODEL_DEFAULT, AgenteLFM, Tool
 
 for _n in ("httpx", "httpcore", "sentence_transformers", "urllib3", "transformers", "huggingface_hub"):
     logging.getLogger(_n).setLevel(logging.WARNING)
@@ -656,10 +657,16 @@ def criar_agente(web: bool = False, mostrar_pensamento: bool = False, pensar: bo
 
 
 def _criar_agente_base(web, mostrar_pensamento, pensar, stream, max_rodadas, verbose_tools, **kw) -> AgenteLFM:
+    # AGENT_BACKEND=openrouter usa o mesmo LFM2.5 pela API gratuita, sem GPU e sem baixar pesos.
+    backend = os.getenv("AGENT_BACKEND", kw.pop("backend", "local")).strip().lower()
+    padrao_modelo = OPENROUTER_MODEL_DEFAULT if backend == "openrouter" else "LiquidAI/LFM2.5-2.6B"
+    modelo = os.getenv("AGENT_MODEL_OPENROUTER" if backend == "openrouter" else "AGENT_MODEL_ID",
+                       kw.pop("model_id", padrao_modelo))
     return AgenteLFM(
+        backend=backend,
         system_prompt=montar_system_prompt(web),
         tools=montar_tools(web),
-        model_id=os.getenv("AGENT_MODEL_ID", kw.pop("model_id", "LiquidAI/LFM2.5-2.6B")),
+        model_id=modelo,
         max_new_tokens=int(os.getenv("AGENT_MAX_NEW_TOKENS", kw.pop("max_new_tokens", 2048))),
         temperature=float(os.getenv("AGENT_TEMPERATURE", kw.pop("temperature", 0.1))),
         pensar=pensar, mostrar_pensamento=mostrar_pensamento, max_tool_rounds=max_rodadas,
@@ -686,7 +693,10 @@ def main():
     ap.add_argument("--sem-pensar", action="store_true", help=argparse.SUPPRESS)  # compatibilidade (já é o padrão)
     ap.add_argument("--max-rodadas", type=int, default=6, help="Máximo de rodadas de ferramentas por pergunta")
     ap.add_argument("--device", default=None, choices=["auto", "cuda", "cpu"],
-                    help="Onde rodar o modelo (padrão: auto — GPU se houver; AGENT_DEVICE no .env)")
+                    help="Onde rodar o modelo local (padrão: auto — GPU se houver; AGENT_DEVICE no .env)")
+    ap.add_argument("--backend", default=None, choices=["local", "openrouter"],
+                    help="local = LFM2.5 nesta máquina | openrouter = mesmo modelo pela API gratuita "
+                         "(AGENT_BACKEND no .env)")
     ap.add_argument("--prompt", action="store_true", help="Só imprime o prompt de sistema (esquema) e sai")
     args = ap.parse_args()
 
@@ -694,6 +704,8 @@ def main():
         print(montar_system_prompt(args.web))
         return
 
+    if args.backend:
+        os.environ["AGENT_BACKEND"] = args.backend
     if args.device:
         os.environ["AGENT_DEVICE"] = args.device
         if args.device == "cpu":

@@ -9,9 +9,9 @@ conhecer detalhes de API key ou nome de modelo.
 Embeddings : NVIDIA NIM — nvidia/nv-embedqa-e5-v5 (1024 dims)
 
 LLM — ordem de preferência (avaliada uma vez na inicialização):
-  1. NVIDIA NIM — deepseek-ai/deepseek-v4-pro   (mais capaz)
+  1. NVIDIA NIM — deepseek-ai/deepseek-v4-pro   (mais capaz; só com FEATURE_NVIDIA_LLM=true)
   2. NVIDIA NIM — deepseek-ai/deepseek-v4-flash  (mais rápido)
-  3. OpenRouter  — deepseek/deepseek-v4-flash    (fallback externo)
+  3. OpenRouter  — liquid/lfm-2.5-2.6b:free      (padrão do minicurso, gratuito)
 
 Feature flags (variáveis de ambiente):
   FEATURE_NVIDIA_LLM=false   → desabilita NVIDIA da cadeia LLM (padrão: false)
@@ -134,7 +134,9 @@ NVIDIA_MODEL_PRO    = "deepseek-ai/deepseek-v4-pro"
 NVIDIA_MODEL_FLASH  = "deepseek-ai/deepseek-v4-flash"
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_MODEL    = "deepseek/deepseek-v4-flash"
+# LFM2.5-2.6B servido pelo OpenRouter na faixa gratuita (:free) — mesmo modelo que o
+# agente roda localmente, mas sem GPU. Troque por OPENROUTER_MODEL no .env se quiser outro.
+OPENROUTER_MODEL    = os.getenv("OPENROUTER_MODEL", "liquid/lfm-2.5-2.6b:free")
 
 # ── Cache da lista de provedores disponíveis ──────────────────────────────────
 # Lista de tuplas (base_url, model_id, api_key, label) em ordem de preferência.

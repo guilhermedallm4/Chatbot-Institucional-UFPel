@@ -278,15 +278,57 @@ python agente_rag.py -p "Quem coordena o curso de Ciência da Computação?"
 python agente_rag.py -p "Quais professores pesquisam codificação de vídeo e sua titulação?" --json
 python agente_rag.py --pensar --mostrar-pensamento        # liga e exibe o raciocínio <think> (padrão: desligado)
 python agente_rag.py --web                                # habilita busca na internet
+python agente_rag.py --backend openrouter                 # mesmo LFM2.5 pela API gratuita, sem GPU
 python agente_rag.py --device cpu                         # roda o LLM na RAM, sem GPU (veja a seção abaixo)
 python main.py --etapa agente "sua pergunta"              # via menu do minicurso
 ```
+
+### 3a. Inferência pelo OpenRouter (gratuita, sem GPU)
+
+O agente tem dois backends com a mesma interface:
+
+| `AGENT_BACKEND` | Onde o LLM roda | Custo | Precisa de GPU |
+|---|---|---|---|
+| `local` | `transformers` nesta máquina | nenhum | sim, na prática |
+| `openrouter` (padrão) | API do OpenRouter, modelo `liquid/lfm-2.5-2.6b:free` | gratuito | não |
+
+É **o mesmo modelo** nos dois casos, o LFM2.5-2.6B. Muda só quem executa. A variante do
+OpenRouter tem 65 mil tokens de contexto e suporta tool calling nativo, então o laço agêntico
+é idêntico; a diferença técnica é que as chamadas chegam estruturadas em JSON (`tool_calls`)
+em vez de virem como texto entre `<|tool_call_start|>` e `<|tool_call_end|>`.
+
+```bash
+# 1. chave gratuita em https://openrouter.ai/keys
+echo 'OPENROUTER_API_KEY=sk-or-v1-...' >> aplicacao/.env
+
+# 2. usar
+cd aplicacao
+python agente_rag.py                              # já vem em openrouter (AGENT_BACKEND no .env)
+python agente_rag.py --backend openrouter -p "Quem coordena Ciência da Computação?"
+python agente_rag.py --backend local -p "..."     # volta a rodar na GPU desta máquina
+python avaliar_agente.py --perguntas ../avaliacao/perguntas_computacao.jsonl --backend openrouter
+```
+
+O pipeline clássico do minicurso (`pipeline.py`, `chatbot.py`, `app.py`) também voltou ao
+OpenRouter: `providers.py` usa `OPENROUTER_MODEL`, que agora é `liquid/lfm-2.5-2.6b:free`.
+A cadeia de fallback continua existindo — a NVIDIA só entra se `FEATURE_NVIDIA_LLM=true` e
+houver `NVIDIA_API_KEY`.
+
+Os **embeddings não passam pelo OpenRouter**: continuam locais (`BAAI/bge-m3`, 1024 dims), que
+rodam bem em CPU (95 ms por consulta). Só a geração de texto vai para a API.
+
+Limites da faixa gratuita: há um teto de requisições por minuto. O cliente trata o HTTP 429
+sozinho, respeitando o `Retry-After` e tentando até três vezes, então uma avaliação em lote não
+morre no meio — só fica mais lenta.
 
 ### 3b. Rodar o LLM na RAM (sem GPU)
 
 `--device cpu` (ou `AGENT_DEVICE=cpu` no `.env`) carrega o modelo na memória principal.
 Cabe com folga, mas a latência inviabiliza uso interativo. Medições nesta máquina
 (24 núcleos, AVX2 sem AVX-512/AMX, 125 GB de RAM, RTX 4090):
+
+Isso vale para o backend `local`. Com `AGENT_BACKEND=openrouter` a máquina não carrega modelo
+nenhum, e a latência passa a depender da fila do provedor.
 
 | | RAM/VRAM | prefill (4.765 tokens) | geração | pergunta `coord_cc` ponta a ponta |
 |---|---|---|---|---|
